@@ -1,5 +1,5 @@
 'use client';
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function Chat() {
     const [messages, setMessages] = useState([{
@@ -12,6 +12,13 @@ export default function Chat() {
         content: "",
         timestamp: new Date(),
     }]);
+
+    useEffect(() => {
+        const authCode = window.localStorage.getItem('authCode');
+        if (!authCode) {
+            window.location.href = '/login';
+        }
+    }, []);
 
     function sendMessage(e: React.FormEvent) {
         e.preventDefault();
