@@ -12,7 +12,7 @@ export default function Header() {
             <div className="p-5 flex justify-between">
                 <h1>
                     <Link href="/">
-                        EntChat
+                        ASM Chat
                     </Link>
                 </h1>
 

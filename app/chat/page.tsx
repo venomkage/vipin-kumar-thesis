@@ -20,10 +20,31 @@ export default function Chat() {
         }
     }, []);
 
+    async function translateMessage(message: string) {
+        const res = await fetch("http://127.0.0.1:5000/translate", {
+            method: "POST",
+            body: JSON.stringify({
+                q: message,
+                source: "auto",
+                target: "de",
+                format: "text",
+                alternatives: 3,
+                api_key: ""
+            }),
+            headers: { "Content-Type": "application/json" }
+        });
+
+        // const { translatedText } = await res.json();
+
+        // alert
+        console.log(await res.json())
+        // alert(`Translated Text: ${translatedText}`);
+    }
+
     function sendMessage(e: React.FormEvent) {
         e.preventDefault();
         if (message[0].content.trim() === "") return;
-
+        translateMessage(message[0].content);
         setMessages((prevMessage) => [
             {
                 sender: "user",
