@@ -2,16 +2,19 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import { useAuthStore } from "@/zustand-state/store";
 
 export default function Login() {
 
     const router = useRouter();
+    const authCode = useAuthStore((state) => state.authCode);
+    const setAuthCode = useAuthStore((state) => state.setAuthCode);
     const [err, setErr] = useState<string | null>(null);
 
     async function onLogin(event: React.FormEvent) {
         event.preventDefault();
 
-        const response = await fetch('/api/auth', {
+        const response = await fetch('/api/auth/anon_login', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -19,6 +22,7 @@ export default function Login() {
             body: JSON.stringify({
                 username: (event.target as any)[0].value,
                 password: (event.target as any)[1].value,
+                storedId: typeof window !== "undefined" ? window.localStorage.getItem('userId') : null,
             }),
         });
 
@@ -26,7 +30,7 @@ export default function Login() {
 
         if (response.status === 200) {
             router.push('/chat');
-            window.localStorage.setItem('authCode', data.authCode);
+            setAuthCode(data.authCode);
         } else {
             setErr(data.message);
             setTimeout(() => setErr(null), 3000);

@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useAuthStore } from "@/zustand-state/store";
 
 export default function Header() {
     const router = useRouter();
-    const authCode = typeof window !== "undefined" ? window.localStorage.getItem('authCode') : null;
+    const authCode = useAuthStore((state) => state.authCode);
+    const setAuthCode = useAuthStore((state) => state.setAuthCode);
 
     return (
         <nav>
@@ -17,19 +19,18 @@ export default function Header() {
                 </h1>
 
                 <div>
-                    <Link href="/settings" className="mr-4">
+                    {authCode && <Link href="/settings" className="mr-4">
                         Settings
-                    </Link>
-                    {authCode ? (
+                    </Link>}
+                    {authCode && (
                         <button className="cursor-pointer" onClick={() => {
                             window.localStorage.removeItem('authCode');
-                            router.push('/login');
+                            setAuthCode(null);
+                            router.push('/');
                         }}>
                             Logout
                         </button>
-                    ) : <Link href="/login">
-                        Login
-                    </Link>}
+                    )}
 
                 </div>
             </div>

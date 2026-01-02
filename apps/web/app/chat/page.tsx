@@ -1,7 +1,12 @@
 'use client';
+import { useAuthStore } from "@/zustand-state/store";
+import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 export default function Chat() {
+    const authCode = useAuthStore((state) => state.authCode);
+    const router = useRouter();
+
     const [messages, setMessages] = useState([{
         sender: "user",
         content: "",
@@ -14,19 +19,19 @@ export default function Chat() {
     }]);
 
     useEffect(() => {
-        const authCode = window.localStorage.getItem('authCode');
         if (!authCode) {
-            window.location.href = '/login';
+            router.push('/login');
         }
-    }, []);
+    }, [authCode]);
 
-    async function translateMessage(message: string) {
+    async function translateMessage(message: string): Promise<string> {
+        const prefferedLanguage = typeof window !== "undefined" ? window.localStorage.getItem('preferredLanguage') : 'en';
         const res = await fetch("http://127.0.0.1:5000/translate", {
             method: "POST",
             body: JSON.stringify({
                 q: message,
                 source: "auto",
-                target: "de",
+                target: prefferedLanguage || 'en',
                 format: "text",
                 alternatives: 3,
                 api_key: ""
@@ -34,21 +39,19 @@ export default function Chat() {
             headers: { "Content-Type": "application/json" }
         });
 
-        // const { translatedText } = await res.json();
-
-        // alert
-        console.log(await res.json())
-        // alert(`Translated Text: ${translatedText}`);
+        const { translatedText } = await res.json();
+        return translatedText;
     }
 
-    function sendMessage(e: React.FormEvent) {
+    async function sendMessage(e: React.FormEvent) {
         e.preventDefault();
         if (message[0].content.trim() === "") return;
-        translateMessage(message[0].content);
+        const translatedMessage = await translateMessage(message[0].content);
+
         setMessages((prevMessage) => [
             {
                 sender: "user",
-                content: message[0].content,
+                content: translatedMessage,
                 timestamp: new Date(),
             },
             ...prevMessage
