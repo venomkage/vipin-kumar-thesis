@@ -17,6 +17,9 @@ export default function Header() {
                 </h1>
 
                 <div>
+                    <Link href="/settings" className="mr-4">
+                        Settings
+                    </Link>
                     {authCode ? (
                         <button className="cursor-pointer" onClick={() => {
                             window.localStorage.removeItem('authCode');
