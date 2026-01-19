@@ -6,6 +6,16 @@ node_modules/
 .env.*
 !.env.example
 
+# Python virtual environments (anywhere)
+.venv/
+**/.venv/
+venv/
+**/venv/
+
+# Python cache
+__pycache__/
+*.pyc
+
 # Logs
 npm-debug.log*
 pnpm-debug.log*
