@@ -14,7 +14,7 @@ venv/
 
 # Python cache
 __pycache__/
-*.pyc
+*.pyc 
 
 # Logs
 npm-debug.log*
