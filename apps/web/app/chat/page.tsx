@@ -1,93 +1,149 @@
-'use client';
-import { useAuthStore } from "@/zustand-state/store";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+// app/chat/page.tsx
+"use client";
 
-export default function Chat() {
-    const authCode = useAuthStore((state) => state.authCode);
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { loadSessionIdentity } from "@/lib/anonVault";
+
+type UiMessage = {
+    id: string;
+    sender_id: string;
+    body: string;
+    ts: number;
+};
+
+function makeId() {
+    return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+export default function ChatPage() {
     const router = useRouter();
 
-    const [messages, setMessages] = useState([{
-        sender: "user",
-        content: "",
-        timestamp: new Date(),
-    }]);
-    const [message, setMessage] = useState([{
-        sender: "user",
-        content: "",
-        timestamp: new Date(),
-    }]);
+    // Identity is now unlocked per-session (sessionStorage), via /login
+    const identity = useMemo(() => loadSessionIdentity(), []);
+
+    const [roomId, setRoomId] = useState<string>(""); // placeholder for later realtime rooms
+    const [draft, setDraft] = useState("");
+    const [messages, setMessages] = useState<UiMessage[]>([]);
+    const bottomRef = useRef<HTMLDivElement | null>(null);
 
     useEffect(() => {
-        if (!authCode) {
-            router.push('/login');
-        }
-    }, [authCode]);
+        // Hard gate: must be unlocked
+        if (!identity) router.replace("/login");
+    }, [identity, router]);
 
-    async function translateMessage(message: string): Promise<string> {
-        const prefferedLanguage = typeof window !== "undefined" ? window.localStorage.getItem('preferredLanguage') : 'en';
-        const res = await fetch("http://127.0.0.1:5000/translate", {
-            method: "POST",
-            body: JSON.stringify({
-                q: message,
-                source: "auto",
-                target: prefferedLanguage || 'en',
-                format: "text",
-                alternatives: 3,
-                api_key: ""
-            }),
-            headers: { "Content-Type": "application/json" }
-        });
+    useEffect(() => {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }, [messages.length]);
 
-        const { translatedText } = await res.json();
-        return translatedText;
-    }
+    if (!identity) return null;
 
-    async function sendMessage(e: React.FormEvent) {
-        e.preventDefault();
-        if (message[0].content.trim() === "") return;
-        const translatedMessage = await translateMessage(message[0].content);
+    const onSend = () => {
+        const text = draft.trim();
+        if (!text) return;
 
-        setMessages((prevMessage) => [
-            {
-                sender: "user",
-                content: translatedMessage,
-                timestamp: new Date(),
-            },
-            ...prevMessage
-        ]);
-        setMessage([{ sender: "user", content: "", timestamp: new Date() }]);
-    }
+        const msg: UiMessage = {
+            id: makeId(),
+            sender_id: identity.anon_id,
+            body: text,
+            ts: Date.now(),
+        };
+
+        // Baseline: local echo only (no realtime yet)
+        setMessages((prev) => [...prev, msg]);
+        setDraft("");
+    };
+
+    const onClear = () => setMessages([]);
 
     return (
-        <div className="flex flex-col items-center p-20 justify-end h-screen">
-            <div className="w-full h-9/10 border p-5 mb-5 rounded 
-                overflow-y-scroll flex
-                flex-col-reverse 
-                text-green-700
-            ">
-                {messages.map((msg, index) => {
-                    if (msg.content.trim() === "") return null;
+        <main style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
+            <header style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                <div>
+                    <h1 style={{ margin: 0 }}>Chat (Baseline)</h1>
+                    <div style={{ fontSize: 12, opacity: 0.75 }}>
+                        You: <code>{identity.anon_id}</code>
+                    </div>
+                </div>
 
-                    return (
-                        <div key={index} className={`mb-2 p-2 rounded ${msg.sender === "user" ? "bg-blue-100 self-end" : "bg-gray-200 self-start"}`}>
-                            <p>{msg.content}</p>
-                            <span className="text-xs text-gray-500">{msg.timestamp.toLocaleTimeString()}</span>
-                        </div>
-                    );
-                })}
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <input
+                        value={roomId}
+                        onChange={(e) => setRoomId(e.target.value)}
+                        placeholder="Room ID (later)"
+                        style={{ padding: "8px 10px", width: 220 }}
+                    />
+                    <button onClick={() => router.push("/logout")} style={{ padding: "8px 10px" }}>
+                        Logout
+                    </button>
+                </div>
+            </header>
 
-            </div>
-            <form className="w-full flex items-start" onSubmit={sendMessage}>
-                <input type="text" name="message" id="message" className="border p-2 mb-2 rounded flex-8 border-green-700"
-                    placeholder="Type your message here..."
-                    value={message[0].content}
-                    onChange={(e) => setMessage([{ ...message[0], content: e.target.value }])}
+            <section
+                style={{
+                    marginTop: 16,
+                    border: "1px solid rgba(0,0,0,0.15)",
+                    borderRadius: 10,
+                    padding: 12,
+                    height: "60vh",
+                    overflow: "auto",
+                }}
+            >
+                {messages.length === 0 ? (
+                    <p style={{ opacity: 0.7 }}>No messages yet. Type something and send.</p>
+                ) : (
+                    <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 10 }}>
+                        {messages.map((m) => {
+                            const mine = m.sender_id === identity.anon_id;
+                            return (
+                                <li key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start" }}>
+                                    <div
+                                        style={{
+                                            maxWidth: "75%",
+                                            padding: "10px 12px",
+                                            borderRadius: 12,
+                                            border: "1px solid rgba(0,0,0,0.15)",
+                                            background: "rgba(0,0,0,0.03)",
+                                        }}
+                                    >
+                                        <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>
+                                            {mine ? "You" : m.sender_id} • {new Date(m.ts).toLocaleTimeString()}
+                                        </div>
+                                        <div style={{ whiteSpace: "pre-wrap" }}>{m.body}</div>
+                                    </div>
+                                </li>
+                            );
+                        })}
+                    </ul>
+                )}
+                <div ref={bottomRef} />
+            </section>
+
+            <footer style={{ marginTop: 12, display: "flex", gap: 8 }}>
+                <input
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            onSend();
+                        }
+                    }}
+                    placeholder="Type a message…"
+                    style={{ flex: 1, padding: "10px 12px" }}
                 />
-                <button className="bg-green-700 text-white p-2 rounded ml-2 flex-2"
-                    type="submit"
-                >Send</button>
-            </form>
-        </div>
-    )
+                <button onClick={onSend} style={{ padding: "10px 14px" }}>
+                    Send
+                </button>
+                <button onClick={onClear} style={{ padding: "10px 14px" }}>
+                    Clear
+                </button>
+            </footer>
+
+            <p style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
+                Identity is unlocked via <code>/login</code> and stored only in <code>sessionStorage</code>. Next step is adding
+                real-time transport (Socket.io/Supabase).
+            </p>
+        </main>
+    );
 }

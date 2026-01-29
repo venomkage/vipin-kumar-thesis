@@ -1,54 +1,59 @@
-'use client';
+// app/login/page.tsx
+"use client";
 
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { useAuthStore } from "@/zustand-state/store";
+import { hasVault, loadSessionIdentity, loginWithRecoveryCode } from "@/lib/anonVault";
 
-export default function Login() {
-
+export default function LoginPage() {
     const router = useRouter();
-    const authCode = useAuthStore((state) => state.authCode);
-    const setAuthCode = useAuthStore((state) => state.setAuthCode);
+    const [code, setCode] = useState("");
     const [err, setErr] = useState<string | null>(null);
+    const [busy, setBusy] = useState(false);
 
-    async function onLogin(event: React.FormEvent) {
-        event.preventDefault();
+    useEffect(() => {
+        // If already unlocked this session, go straight to chat
+        if (loadSessionIdentity()) router.replace("/chat");
+    }, [router]);
 
-        const response = await fetch('/api/auth/anon_login', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-                username: (event.target as any)[0].value,
-                password: (event.target as any)[1].value,
-                storedId: typeof window !== "undefined" ? window.localStorage.getItem('userId') : null,
-            }),
-        });
-
-        const data = await response.json();
-
-        if (response.status === 200) {
-            router.push('/chat');
-            setAuthCode(data.authCode);
-        } else {
-            setErr(data.message);
-            setTimeout(() => setErr(null), 3000);
+    const onLogin = async () => {
+        setErr(null);
+        setBusy(true);
+        try {
+            if (!hasVault()) {
+                router.replace("/register");
+                return;
+            }
+            await loginWithRecoveryCode(code);
+            router.replace("/chat");
+        } catch (e: any) {
+            setErr("Invalid recovery code.");
+        } finally {
+            setBusy(false);
         }
-
-    }
-
+    };
 
     return (
-        <div className="flex flex-col items-center p-20">
-            Welcome to the login page!
+        <main style={{ padding: 24, maxWidth: 520 }}>
+            <h1>Login (Unlock)</h1>
+            <p>Enter your recovery code to unlock the anonymous identity stored on this device.</p>
 
-            <form onSubmit={onLogin} className="flex flex-col mt-5 ">
-                <input type="text" placeholder="Username" className="border p-1 mb-2 rounded" name="username" />
-                <input type="password" placeholder="Password" className="border p-1 mb-2 rounded" name="password" />
-                {err && <p className="text-red-500 mb-2">{err}</p>}
-                <button type="submit" className="bg-blue-500 text-white p-2 rounded">Login</button>
-            </form>
-        </div>
-    )
+            <input
+                value={code}
+                onChange={(e) => setCode(e.target.value)}
+                placeholder="XXXXX-XXXXX-XXXX"
+                autoCapitalize="characters"
+                style={{ width: "100%", padding: "10px 12px" }}
+            />
+
+            <button onClick={onLogin} disabled={busy} style={{ padding: "10px 14px", marginTop: 12 }}>
+                {busy ? "Unlocking…" : "Unlock"}
+            </button>
+
+            {err && <p style={{ marginTop: 10, color: "crimson" }}>{err}</p>}
+            <p style={{ marginTop: 14, opacity: 0.75 }}>
+                No vault on this device? Go to <a href="/register">/register</a>.
+            </p>
+        </main>
+    );
 }
