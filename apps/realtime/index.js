@@ -44,23 +44,25 @@ io.on("connection", (socket) => {
 
   // Relay message to everyone in the room (including sender)
   socket.on("send_message", (msg) => {
-    // msg: { room_id, sender_id, body, ts }
-    if (!msg || typeof msg !== "object") return;
-    const { room_id, sender_id, body, ts } = msg;
+    console.log(msg)
+  if (!msg || typeof msg !== "object") return;
 
-    if (
-      !room_id ||
-      typeof room_id !== "string" ||
-      !sender_id ||
-      typeof sender_id !== "string" ||
-      typeof body !== "string" ||
-      typeof ts !== "number"
-    ) {
-      return;
-    }
+  const { room_id, sender_id, ts, body, nonce, ciphertext } = msg;
 
-    io.to(room_id).emit("message", msg);
-  });
+  if (
+    !room_id || typeof room_id !== "string" ||
+    !sender_id || typeof sender_id !== "string" ||
+    typeof ts !== "number"
+  ) return;
+
+  const isPlaintext = typeof body === "string";
+  const isEncrypted = typeof nonce === "string" && typeof ciphertext === "string";
+
+  if (!isPlaintext && !isEncrypted) return;
+
+  io.to(room_id).emit("message", msg);
+});
+
 });
 
 server.listen(PORT, () => {
