@@ -3,18 +3,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { io, type Socket } from "socket.io-client";
+
 import { loadSessionIdentity } from "@/lib/anonVault";
 import { encryptMessage, decryptMessage, type EncryptedPayload } from "@/lib/crypto/secretbox";
 import { deriveRoomKey } from "@/lib/crypto/roomkeys";
+import { translateText, checkTranslateService } from "@/lib/translate";
 
 type UiMessage = {
     id: string;
     sender_id: string;
-    body: string;
-    ciphertext?: string;  // base64, for demo only
     ts: number;
-};
 
+    original: string; // decrypted plaintext
+    translated?: string;
+    view: "original" | "translated";
+
+    // Demo only
+    ciphertext?: string;
+
+    translating?: boolean;
+    translateError?: string;
+};
 
 type WireMessage = {
     room_id: string;
@@ -37,6 +46,26 @@ export default function ChatPage() {
     const [status, setStatus] = useState<"disconnected" | "connected">("disconnected");
     const [cryptoReady, setCryptoReady] = useState(false);
 
+    // Translation controls
+    const [autoTranslate, setAutoTranslate] = useState(false);
+    const [targetLang, setTargetLang] = useState<"en" | "de">("en");
+
+    // Translation service status
+    const [translateOnline, setTranslateOnline] = useState<boolean | null>(null);
+
+    // Cache: (targetLang::originalText) -> translatedText
+    const translateCacheRef = useRef<Map<string, string>>(new Map());
+
+    // Keep latest settings visible inside socket callbacks without re-registering handlers
+    const autoTranslateRef = useRef(autoTranslate);
+    const targetLangRef = useRef(targetLang);
+    useEffect(() => {
+        autoTranslateRef.current = autoTranslate;
+    }, [autoTranslate]);
+    useEffect(() => {
+        targetLangRef.current = targetLang;
+    }, [targetLang]);
+
     const socketRef = useRef<Socket | null>(null);
     const activeRoomRef = useRef<string>("");
     const roomKeyRef = useRef<Uint8Array | null>(null);
@@ -48,8 +77,43 @@ export default function ChatPage() {
     }, [identity, router]);
 
     useEffect(() => {
+        // sensible default for target language
+        const b = (navigator.language || "en").slice(0, 2);
+        if (b === "en" || b === "de") setTargetLang(b);
+    }, []);
+
+    useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: "smooth" });
     }, [messages.length]);
+
+    // (1) Translation service health check
+    useEffect(() => {
+        let cancelled = false;
+
+        (async () => {
+            const ok = await checkTranslateService();
+            if (cancelled) return;
+            setTranslateOnline(ok);
+
+            // If offline, force auto-translate OFF to avoid noisy failures
+            if (!ok) setAutoTranslate(false);
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    // Helper: cached translation
+    const getOrTranslate = async (text: string, target: "en" | "de") => {
+        const key = `${target}::${text}`;
+        const cached = translateCacheRef.current.get(key);
+        if (cached) return cached;
+
+        const t = await translateText(text, target, "auto");
+        translateCacheRef.current.set(key, t);
+        return t;
+    };
 
     // Connect socket once per mount
     useEffect(() => {
@@ -65,6 +129,7 @@ export default function ChatPage() {
         socketRef.current = socket;
 
         socket.on("connect", () => setStatus("connected"));
+
         socket.on("disconnect", () => {
             setStatus("disconnected");
             setJoined(false);
@@ -76,7 +141,7 @@ export default function ChatPage() {
         socket.on("joined_room", ({ room_id }: { room_id: string }) => {
             activeRoomRef.current = room_id;
             setJoined(true);
-            setMessages([]); // keep it simple: clear on join
+            setMessages([]); // clear on join
         });
 
         socket.on("left_room", ({ room_id }: { room_id: string }) => {
@@ -89,29 +154,47 @@ export default function ChatPage() {
         });
 
         socket.on("message", async (msg: WireMessage) => {
-            // Only accept for active room
             if (!msg?.room_id || msg.room_id !== activeRoomRef.current) return;
+
             const key = roomKeyRef.current;
             if (!key) return;
 
             try {
                 const plaintext = await decryptMessage({ nonce: msg.nonce, ciphertext: msg.ciphertext }, key);
+
+                const m: UiMessage = {
+                    id: makeId(),
+                    sender_id: msg.sender_id,
+                    ts: msg.ts,
+                    original: plaintext,
+                    view: "original",
+                    ciphertext: msg.ciphertext, // demo
+                };
+
+                // Auto-translate: translate immediately after decrypt (only if service online)
+                if (autoTranslateRef.current && translateOnline) {
+                    try {
+                        const t = await getOrTranslate(plaintext, targetLangRef.current);
+                        m.translated = t;
+                        m.view = "translated";
+                    } catch {
+                        m.translateError = "translate failed";
+                        m.view = "original";
+                    }
+                }
+
+                setMessages((prev) => [...prev, m]);
+            } catch {
                 setMessages((prev) => [
                     ...prev,
                     {
                         id: makeId(),
                         sender_id: msg.sender_id,
-                        body: plaintext,
-                        ciphertext: msg.ciphertext, // for demo, i have given this
                         ts: msg.ts,
+                        original: "[decrypt failed]",
+                        view: "original",
+                        ciphertext: msg.ciphertext,
                     },
-                ]);
-
-            } catch {
-                // If decrypt fails, show a placeholder (useful for debugging mismatched room keys)
-                setMessages((prev) => [
-                    ...prev,
-                    { id: makeId(), sender_id: msg.sender_id, body: "[decrypt failed]", ts: msg.ts },
                 ]);
             }
         });
@@ -122,7 +205,8 @@ export default function ChatPage() {
             activeRoomRef.current = "";
             roomKeyRef.current = null;
         };
-    }, [identity]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [identity, translateOnline]);
 
     if (!identity) return null;
 
@@ -132,12 +216,10 @@ export default function ChatPage() {
         if (!normalizedRoomId) return;
         if (status !== "connected") return;
 
-        // Derive the room key (deterministic from roomId)
         const key = await deriveRoomKey(normalizedRoomId);
         roomKeyRef.current = key;
         setCryptoReady(true);
 
-        // Leave old room if needed
         if (activeRoomRef.current && activeRoomRef.current !== normalizedRoomId) {
             socketRef.current?.emit("leave_room", { room_id: activeRoomRef.current });
             activeRoomRef.current = "";
@@ -176,23 +258,100 @@ export default function ChatPage() {
 
     const onClear = () => setMessages([]);
 
+    const toggleMessageView = async (id: string) => {
+        const current = messages.find((m) => m.id === id);
+        if (!current) return;
+
+        if (current.view === "translated") {
+            setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, view: "original" } : m)));
+            return;
+        }
+
+        // original -> translated
+        if (!translateOnline) {
+            setMessages((prev) =>
+                prev.map((m) => (m.id === id ? { ...m, translateError: "translation service offline" } : m))
+            );
+            return;
+        }
+
+        if (current.translated) {
+            setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, view: "translated" } : m)));
+            return;
+        }
+
+        setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, translating: true, translateError: undefined } : m)));
+
+        try {
+            const t = await getOrTranslate(current.original, targetLang);
+            setMessages((prev) =>
+                prev.map((m) =>
+                    m.id === id ? { ...m, translated: t, view: "translated", translating: false } : m
+                )
+            );
+        } catch {
+            setMessages((prev) =>
+                prev.map((m) => (m.id === id ? { ...m, translating: false, translateError: "translate failed" } : m))
+            );
+        }
+    };
+
     const roomDisplay = joined ? activeRoomRef.current : "-";
 
     return (
         <main style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
+            {/* Translation status banner */}
+            {translateOnline === false && (
+                <div
+                    style={{
+                        marginBottom: 12,
+                        padding: "10px 12px",
+                        borderRadius: 10,
+                        border: "1px solid rgba(0,0,0,0.15)",
+                        background: "rgba(255, 0, 0, 0.06)",
+                        fontSize: 13,
+                    }}
+                >
+                    Translation service is offline. Start LibreTranslate (e.g. <code>libretranslate --port 5000</code>) to enable
+                    translations.
+                </div>
+            )}
+
             <header style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
                 <div>
-                    <h1 style={{ margin: 0 }}>Chat (E2EE)</h1>
+                    <h1 style={{ margin: 0 }}>Chat (E2EE + Translation)</h1>
                     <div style={{ fontSize: 12, opacity: 0.75 }}>
                         You: <code>{identity.anon_id}</code>
                     </div>
                     <div style={{ fontSize: 12, opacity: 0.75 }}>
                         Status: <code>{status}</code> • Room: <code>{roomDisplay}</code> • Crypto:{" "}
-                        <code>{cryptoReady ? "ready" : "not-ready"}</code>
+                        <code>{cryptoReady ? "ready" : "not-ready"}</code> • Translate:{" "}
+                        <code>{translateOnline === null ? "checking" : translateOnline ? "online" : "offline"}</code>
                     </div>
                 </div>
 
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    <label style={{ fontSize: 12, opacity: 0.85, display: "flex", gap: 6, alignItems: "center" }}>
+                        <input
+                            type="checkbox"
+                            checked={autoTranslate}
+                            disabled={!translateOnline}
+                            onChange={(e) => setAutoTranslate(e.target.checked)}
+                        />
+                        Auto-translate
+                    </label>
+
+                    <select
+                        value={targetLang}
+                        onChange={(e) => setTargetLang(e.target.value as "en" | "de")}
+                        style={{ padding: "6px 8px" }}
+                        title="Translate to"
+                        disabled={!translateOnline}
+                    >
+                        <option value="en">English</option>
+                        <option value="de">German</option>
+                    </select>
+
                     <input
                         value={roomId}
                         onChange={(e) => setRoomId(e.target.value)}
@@ -230,13 +389,18 @@ export default function ChatPage() {
                 }}
             >
                 {!joined ? (
-                    <p style={{ opacity: 0.7 }}>Enter a room ID and click Join. Use a high-entropy room ID as the shared secret.</p>
+                    <p style={{ opacity: 0.7 }}>
+                        Enter a room ID and click Join. Use a high-entropy room ID as the shared secret.
+                    </p>
                 ) : messages.length === 0 ? (
                     <p style={{ opacity: 0.7 }}>No messages yet. Type something and send.</p>
                 ) : (
                     <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "grid", gap: 10 }}>
                         {messages.map((m) => {
                             const mine = m.sender_id === identity.anon_id;
+                            const showingTranslated = m.view === "translated" && !!m.translated;
+                            const shownText = showingTranslated ? m.translated! : m.original;
+
                             return (
                                 <li key={m.id} style={{ display: "flex", justifyContent: mine ? "flex-end" : "flex-start" }}>
                                     <div
@@ -251,24 +415,27 @@ export default function ChatPage() {
                                         <div style={{ fontSize: 11, opacity: 0.7, marginBottom: 4 }}>
                                             {mine ? "You" : m.sender_id} • {new Date(m.ts).toLocaleTimeString()}
                                         </div>
-                                        <div style={{ whiteSpace: "pre-wrap" }}>{m.body}</div>
 
-                                        {/* --- Ciphertext demo, it can be commented or removed --- */}
-                                        {m.ciphertext && (
-                                            <div
-                                                style={{
-                                                    marginTop: 6,
-                                                    fontSize: 11,
-                                                    opacity: 0.55,
-                                                    fontFamily: "monospace",
-                                                    wordBreak: "break-all",
-                                                }}
-                                            >
-                                                <span style={{ fontStyle: "italic" }}>ciphertext:</span>{" "}
-                                                {m.ciphertext}
+                                        <div style={{ whiteSpace: "pre-wrap" }}>{shownText}</div>
+
+                                        {/* Per-message toggle when auto-translate is OFF */}
+                                        {!autoTranslate && (
+                                            <div style={{ marginTop: 6, display: "flex", gap: 10, alignItems: "center", fontSize: 12, opacity: 0.85 }}>
+                                                <button onClick={() => toggleMessageView(m.id)} style={{ padding: "4px 8px", fontSize: 12 }}>
+                                                    {m.view === "original" ? "Show translated" : "Show original"}
+                                                </button>
+
+                                                {m.translating && <span>Translating…</span>}
+                                                {m.translateError && <span style={{ color: "crimson" }}>{m.translateError}</span>}
                                             </div>
                                         )}
 
+                                        {/* --- Ciphertext demo (comment out anytime) --- */}
+                                        {m.ciphertext && (
+                                            <div style={{ marginTop: 6, fontSize: 11, opacity: 0.55, fontFamily: "monospace", wordBreak: "break-all" }}>
+                                                <span style={{ fontStyle: "italic" }}>ciphertext:</span> {m.ciphertext}
+                                            </div>
+                                        )}
                                     </div>
                                 </li>
                             );
@@ -301,7 +468,7 @@ export default function ChatPage() {
             </footer>
 
             <p style={{ marginTop: 10, fontSize: 12, opacity: 0.7 }}>
-                E2EE uses a deterministic per-room key derived from the room ID (shared secret). Server relays only nonce+ciphertext.
+                Translation happens after local decryption. Results are cached in-memory to reduce repeated calls.
             </p>
         </main>
     );
