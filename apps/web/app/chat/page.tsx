@@ -8,6 +8,8 @@ import { loadSessionIdentity } from "@/lib/anonVault";
 import { encryptMessage, decryptMessage, type EncryptedPayload } from "@/lib/crypto/secretbox";
 import { deriveRoomKey } from "@/lib/crypto/roomkeys";
 import { translateText, checkTranslateService } from "@/lib/translate";
+import { getTelemetryStore } from "@/lib/telemetry";
+
 
 type UiMessage = {
     id: string;
@@ -26,10 +28,13 @@ type UiMessage = {
 };
 
 type WireMessage = {
+    v: 1;
+    msg_id: string;
     room_id: string;
     sender_id: string;
-    ts: number;
+    ts: number; // sender timestamp
 } & EncryptedPayload;
+
 
 function makeId() {
     return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -55,6 +60,8 @@ export default function ChatPage() {
 
     // Cache: (targetLang::originalText) -> translatedText
     const translateCacheRef = useRef<Map<string, string>>(new Map());
+    const telemetryRef = useRef(getTelemetryStore(2000));
+
 
     // Keep latest settings visible inside socket callbacks without re-registering handlers
     const autoTranslateRef = useRef(autoTranslate);
@@ -103,6 +110,15 @@ export default function ChatPage() {
             cancelled = true;
         };
     }, []);
+
+    useEffect(() => {
+        telemetryRef.current.push({
+            type: "session",
+            ts: Date.now(),
+            note: "session_start",
+        });
+    }, []);
+
 
     // Helper: cached translation
     const getOrTranslate = async (text: string, target: "en" | "de") => {
@@ -154,37 +170,44 @@ export default function ChatPage() {
         });
 
         socket.on("message", async (msg: WireMessage) => {
+            // Only accept for active room
             if (!msg?.room_id || msg.room_id !== activeRoomRef.current) return;
 
             const key = roomKeyRef.current;
             if (!key) return;
 
+            const recvNow = Date.now();
+
+            // ---- Decrypt timing + telemetry ----
+            const d0 = performance.now();
+            let plaintext = "";
+            let okDecrypt = false;
+
             try {
-                const plaintext = await decryptMessage({ nonce: msg.nonce, ciphertext: msg.ciphertext }, key);
-
-                const m: UiMessage = {
-                    id: makeId(),
-                    sender_id: msg.sender_id,
-                    ts: msg.ts,
-                    original: plaintext,
-                    view: "original",
-                    ciphertext: msg.ciphertext, // demo
-                };
-
-                // Auto-translate: translate immediately after decrypt (only if service online)
-                if (autoTranslateRef.current && translateOnline) {
-                    try {
-                        const t = await getOrTranslate(plaintext, targetLangRef.current);
-                        m.translated = t;
-                        m.view = "translated";
-                    } catch {
-                        m.translateError = "translate failed";
-                        m.view = "original";
-                    }
-                }
-
-                setMessages((prev) => [...prev, m]);
+                plaintext = await decryptMessage({ nonce: msg.nonce, ciphertext: msg.ciphertext }, key);
+                okDecrypt = true;
             } catch {
+                okDecrypt = false;
+            } finally {
+                const d1 = performance.now();
+
+                telemetryRef.current.push({
+                    type: "msg_recv",
+                    msg_id: msg.msg_id ?? "missing",
+                    v: (msg.v ?? 1) as number,
+                    room_id: msg.room_id,
+                    sender_id: msg.sender_id,
+                    ts_client_recv: recvNow,
+                    ts_sender: msg.ts,
+                    t_decrypt_ms: Math.max(0, d1 - d0),
+                    ok_decrypt: okDecrypt,
+                    auto_translate: autoTranslateRef.current,
+                    target_lang: targetLangRef.current,
+                });
+            }
+
+            // If decrypt failed, still show message placeholder (helps demos/debug)
+            if (!okDecrypt) {
                 setMessages((prev) => [
                     ...prev,
                     {
@@ -193,11 +216,67 @@ export default function ChatPage() {
                         ts: msg.ts,
                         original: "[decrypt failed]",
                         view: "original",
-                        ciphertext: msg.ciphertext,
+                        ciphertext: msg.ciphertext, // demo
                     },
                 ]);
+                return;
             }
+
+            // Build UI message
+            const ui: UiMessage = {
+                id: makeId(),
+                sender_id: msg.sender_id,
+                ts: msg.ts,
+                original: plaintext,
+                view: "original",
+                ciphertext: msg.ciphertext, // demo
+            };
+
+            const shouldAutoTranslate = autoTranslateRef.current && !!translateOnline;
+            if (shouldAutoTranslate) {
+                const trStart = Date.now();
+                const tr0 = performance.now();
+
+                try {
+                    const t = await getOrTranslate(plaintext, targetLangRef.current);
+                    const tr1 = performance.now();
+
+                    telemetryRef.current.push({
+                        type: "translate",
+                        msg_id: msg.msg_id ?? "missing",
+                        v: (msg.v ?? 1) as number,
+                        room_id: msg.room_id,
+                        ts_translate_start: trStart,
+                        t_translate_ms: Math.max(0, tr1 - tr0),
+                        ok_translate: true,
+                        target_lang: targetLangRef.current,
+                    });
+
+                    ui.translated = t;
+                    ui.view = "translated";
+                } catch {
+                    const tr1 = performance.now();
+
+                    telemetryRef.current.push({
+                        type: "translate",
+                        msg_id: msg.msg_id ?? "missing",
+                        v: (msg.v ?? 1) as number,
+                        room_id: msg.room_id,
+                        ts_translate_start: trStart,
+                        t_translate_ms: Math.max(0, tr1 - tr0),
+                        ok_translate: false,
+                        target_lang: targetLangRef.current,
+                    });
+
+                    ui.translateError = "translate failed";
+                    ui.view = "original";
+                }
+            }
+
+            // Push UI message
+            setMessages((prev) => [...prev, ui]);
         });
+
 
         return () => {
             socket.disconnect();
@@ -242,15 +321,36 @@ export default function ChatPage() {
         const key = roomKeyRef.current;
         if (!key) return;
 
+        const msg_id = makeId();
+        const t0 = performance.now();
         const payload = await encryptMessage(text, key);
+        const t1 = performance.now();
+
+        const bytes_ciphertext = payload.ciphertext.length; // base64 length (good enough proxy)
 
         const msg: WireMessage = {
+            v: 1,
+            msg_id,
             room_id: activeRoomRef.current,
             sender_id: identity.anon_id,
             ts: Date.now(),
             nonce: payload.nonce,
             ciphertext: payload.ciphertext,
         };
+
+        telemetryRef.current.push({
+            type: "msg_send",
+            v: 1,
+            msg_id,
+            room_id: msg.room_id,
+            sender_id: msg.sender_id,
+            ts_client_send: Date.now(),
+            t_encrypt_ms: Math.max(0, t1 - t0),
+            bytes_ciphertext,
+            auto_translate: autoTranslateRef.current,
+            target_lang: targetLangRef.current,
+        });
+
 
         socketRef.current?.emit("send_message", msg);
         setDraft("");
@@ -374,6 +474,18 @@ export default function ChatPage() {
 
                     <button onClick={() => router.push("/logout")} style={{ padding: "8px 10px" }}>
                         Logout
+                    </button>
+                    <button
+                        onClick={() => router.push("/logs")}
+                        style={{ padding: "8px 10px" }}
+                    >
+                        View logs
+                    </button>
+                    <button
+                        onClick={() => telemetryRef.current.clear()}
+                        style={{ padding: "8px 10px" }}
+                    >
+                        Clear logs
                     </button>
                 </div>
             </header>
