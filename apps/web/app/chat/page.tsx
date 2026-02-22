@@ -199,7 +199,7 @@ export default function ChatPage() {
                     sender_id: msg.sender_id,
                     ts_client_recv: recvNow,
                     ts_sender: msg.ts,
-                    t_decrypt_ms: Math.max(0, d1 - d0),
+                    t_decrypt_ms: Number(Math.max(0, d1 - d0).toFixed(3)),
                     ok_decrypt: okDecrypt,
                     auto_translate: autoTranslateRef.current,
                     target_lang: targetLangRef.current,
@@ -247,7 +247,7 @@ export default function ChatPage() {
                         v: (msg.v ?? 1) as number,
                         room_id: msg.room_id,
                         ts_translate_start: trStart,
-                        t_translate_ms: Math.max(0, tr1 - tr0),
+                        t_translate_ms: Number(Math.max(0, tr1 - tr0).toFixed(3)),
                         ok_translate: true,
                         target_lang: targetLangRef.current,
                     });
@@ -263,7 +263,7 @@ export default function ChatPage() {
                         v: (msg.v ?? 1) as number,
                         room_id: msg.room_id,
                         ts_translate_start: trStart,
-                        t_translate_ms: Math.max(0, tr1 - tr0),
+                        t_translate_ms: Number(Math.max(0, tr1 - tr0).toFixed(3)),
                         ok_translate: false,
                         target_lang: targetLangRef.current,
                     });
@@ -273,8 +273,19 @@ export default function ChatPage() {
                 }
             }
 
-            // Push UI message
             setMessages((prev) => [...prev, ui]);
+
+            const tsDisplay = Date.now();
+            telemetryRef.current.push({
+                type: "msg_display",
+                msg_id: msg.msg_id ?? "missing",
+                v: (msg.v ?? 1) as number,
+                room_id: msg.room_id,
+                ts_display: tsDisplay,
+                ts_sender: msg.ts,
+                total_e2e_ms: tsDisplay - msg.ts,
+                displayed_view: ui.view,
+            });
         });
 
 
@@ -345,7 +356,7 @@ export default function ChatPage() {
             room_id: msg.room_id,
             sender_id: msg.sender_id,
             ts_client_send: Date.now(),
-            t_encrypt_ms: Math.max(0, t1 - t0),
+            t_encrypt_ms: Number(Math.max(0, t1 - t0).toFixed(3)),
             bytes_ciphertext,
             auto_translate: autoTranslateRef.current,
             target_lang: targetLangRef.current,
@@ -397,6 +408,18 @@ export default function ChatPage() {
     };
 
     const roomDisplay = joined ? activeRoomRef.current : "-";
+
+    function generateSecureRoomSecret(length: number = 24): string {
+        const bytes = new Uint8Array(length);
+        crypto.getRandomValues(bytes);
+
+        const base64 = btoa(String.fromCharCode(...bytes))
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_")
+            .replace(/=+$/, "");
+
+        return base64.slice(0, length);
+    }
 
     return (
         <main style={{ padding: 16, maxWidth: 900, margin: "0 auto" }}>
@@ -455,9 +478,24 @@ export default function ChatPage() {
                     <input
                         value={roomId}
                         onChange={(e) => setRoomId(e.target.value)}
-                        placeholder="Room ID (use a hard-to-guess secret)"
+                        placeholder="Room Secret (shared key)"
                         style={{ padding: "8px 10px", width: 260 }}
                     />
+
+                    <button
+                        onClick={() => {
+                            const secret = generateSecureRoomSecret(24);
+                            setRoomId(secret);
+
+                            // optional auto-copy
+                            if (navigator.clipboard) {
+                                navigator.clipboard.writeText(secret).catch(() => { });
+                            }
+                        }}
+                        style={{ padding: "8px 10px" }}
+                    >
+                        Generate
+                    </button>
 
                     <button
                         onClick={onJoin}

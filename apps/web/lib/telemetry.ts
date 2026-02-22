@@ -41,7 +41,17 @@ export type TelemetryEvent =
       ts: number;
       note: string;
       data?: Record<string, unknown>;
-    };
+    }
+    | {
+    type: "msg_display";
+    msg_id: string;
+    v: number;
+    room_id: string;
+    ts_display: number;     // when UI was updated
+    ts_sender: number;      // sender's ts from wire msg
+    total_e2e_ms: number;   // ts_display - ts_sender
+    displayed_view: "original" | "translated";
+  };
 
 export type TelemetryStore = {
   push: (e: TelemetryEvent) => void;

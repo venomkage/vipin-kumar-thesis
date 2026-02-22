@@ -23,6 +23,9 @@ type MsgSummary = {
 
     ts_send?: number;
     ts_recv?: number;
+
+    total_e2e_ms?: number;
+    displayed_view?: "original" | "translated";
 };
 
 function mean(nums: number[]) {
@@ -80,6 +83,11 @@ export default function LogsPage() {
                 s.translate_ok = e.ok_translate;
                 s.target_lang = e.target_lang;
                 byMsg.set(e.msg_id, s);
+            } else if (e.type === "msg_display") {
+                const s = byMsg.get(e.msg_id) ?? { msg_id: e.msg_id };
+                s.total_e2e_ms = e.total_e2e_ms;
+                s.displayed_view = e.displayed_view;
+                byMsg.set(e.msg_id, s);
             }
         }
 
@@ -91,6 +99,7 @@ export default function LogsPage() {
         const dec = summaries.map(s => s.decrypt_ms).filter((v): v is number => typeof v === "number");
         const rel = summaries.map(s => s.relay_ms).filter((v): v is number => typeof v === "number");
         const tr = summaries.map(s => s.translate_ms).filter((v): v is number => typeof v === "number");
+        const e2e = summaries.map(s => s.total_e2e_ms).filter((v): v is number => typeof v === "number");
 
         const stats = {
             messages: summaries.length,
@@ -98,6 +107,7 @@ export default function LogsPage() {
             avg_decrypt_ms: mean(dec),
             avg_relay_ms: mean(rel),
             avg_translate_ms: mean(tr),
+            avg_total_e2e_ms: mean(e2e),
         };
 
         return { summaries, stats };
@@ -123,7 +133,9 @@ export default function LogsPage() {
                         <code>{stats.avg_relay_ms == null ? "-" : stats.avg_relay_ms.toFixed(2)} ms</code> • Avg encrypt:{" "}
                         <code>{stats.avg_encrypt_ms == null ? "-" : stats.avg_encrypt_ms.toFixed(2)} ms</code> • Avg decrypt:{" "}
                         <code>{stats.avg_decrypt_ms == null ? "-" : stats.avg_decrypt_ms.toFixed(2)} ms</code> • Avg translate:{" "}
-                        <code>{stats.avg_translate_ms == null ? "-" : stats.avg_translate_ms.toFixed(2)} ms</code>
+                        <code>{stats.avg_translate_ms == null ? "-" : stats.avg_translate_ms.toFixed(2)} ms</code> • Avg total E2E:{" "}
+                        <code>{stats.avg_total_e2e_ms == null ? "-" : stats.avg_total_e2e_ms.toFixed(2)} ms
+                        </code>
                     </div>
                 </div>
 
@@ -159,6 +171,7 @@ export default function LogsPage() {
                                     <th style={{ textAlign: "left", padding: 10 }}>msg_id</th>
                                     <th style={{ textAlign: "left", padding: 10 }}>room</th>
                                     <th style={{ textAlign: "right", padding: 10 }}>relay (ms)</th>
+                                    <th style={{ textAlign: "right", padding: 10 }}>total E2E (ms)</th>
                                     <th style={{ textAlign: "right", padding: 10 }}>encrypt (ms)</th>
                                     <th style={{ textAlign: "right", padding: 10 }}>decrypt (ms)</th>
                                     <th style={{ textAlign: "left", padding: 10 }}>decrypt</th>
@@ -174,6 +187,7 @@ export default function LogsPage() {
                                         <td style={{ padding: 10, fontFamily: "monospace", fontSize: 12 }}>{s.msg_id}</td>
                                         <td style={{ padding: 10, fontFamily: "monospace", fontSize: 12 }}>{s.room_id ?? "-"}</td>
                                         <td style={{ padding: 10, textAlign: "right" }}>{s.relay_ms ?? "-"}</td>
+                                        <td style={{ padding: 10, textAlign: "right" }}>{s.total_e2e_ms ?? "-"}</td>
                                         <td style={{ padding: 10, textAlign: "right" }}>{s.encrypt_ms ?? "-"}</td>
                                         <td style={{ padding: 10, textAlign: "right" }}>{s.decrypt_ms ?? "-"}</td>
                                         <td style={{ padding: 10 }}>{s.decrypt_ok == null ? "-" : s.decrypt_ok ? "ok" : "fail"}</td>
