@@ -10,13 +10,12 @@ import { deriveRoomKey } from "@/lib/crypto/roomkeys";
 import { translateText, checkTranslateService } from "@/lib/translate";
 import { getTelemetryStore } from "@/lib/telemetry";
 
-
 type UiMessage = {
     id: string;
     sender_id: string;
     ts: number;
 
-    original: string; // decrypted plaintext
+    original: string; // decrypted plaintext (or plaintext baseline)
     translated?: string;
     view: "original" | "translated";
 
@@ -27,14 +26,24 @@ type UiMessage = {
     translateError?: string;
 };
 
-type WireMessage = {
-    v: 1;
-    msg_id: string;
-    room_id: string;
-    sender_id: string;
-    ts: number; // sender timestamp
-} & EncryptedPayload;
-
+type WireMessage =
+    | ({
+        v: 1;
+        msg_id: string;
+        room_id: string;
+        sender_id: string;
+        ts: number; // sender timestamp
+        enc: true;
+    } & EncryptedPayload)
+    | {
+        v: 1;
+        msg_id: string;
+        room_id: string;
+        sender_id: string;
+        ts: number; // sender timestamp
+        enc: false;
+        body: string; // plaintext
+    };
 
 function makeId() {
     return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
@@ -51,6 +60,13 @@ export default function ChatPage() {
     const [status, setStatus] = useState<"disconnected" | "connected">("disconnected");
     const [cryptoReady, setCryptoReady] = useState(false);
 
+    // (NEW) Baseline toggle: true = E2EE enabled, false = plaintext baseline
+    const [encryptionOn, setEncryptionOn] = useState(true);
+    const encryptionOnRef = useRef(true);
+    useEffect(() => {
+        encryptionOnRef.current = encryptionOn;
+    }, [encryptionOn]);
+
     // Translation controls
     const [autoTranslate, setAutoTranslate] = useState(false);
     const [targetLang, setTargetLang] = useState<"en" | "de">("en");
@@ -61,7 +77,6 @@ export default function ChatPage() {
     // Cache: (targetLang::originalText) -> translatedText
     const translateCacheRef = useRef<Map<string, string>>(new Map());
     const telemetryRef = useRef(getTelemetryStore(2000));
-
 
     // Keep latest settings visible inside socket callbacks without re-registering handlers
     const autoTranslateRef = useRef(autoTranslate);
@@ -119,7 +134,6 @@ export default function ChatPage() {
         });
     }, []);
 
-
     // Helper: cached translation
     const getOrTranslate = async (text: string, target: "en" | "de") => {
         const key = `${target}::${text}`;
@@ -173,10 +187,99 @@ export default function ChatPage() {
             // Only accept for active room
             if (!msg?.room_id || msg.room_id !== activeRoomRef.current) return;
 
+            const recvNow = Date.now();
+
+            // ------------------------------
+            // BASELINE PATH (plaintext)
+            // ------------------------------
+            if (msg.enc === false) {
+                // recv telemetry (no decrypt)
+                telemetryRef.current.push({
+                    type: "msg_recv",
+                    msg_id: msg.msg_id ?? "missing",
+                    v: (msg.v ?? 1) as number,
+                    room_id: msg.room_id,
+                    sender_id: msg.sender_id,
+                    ts_client_recv: recvNow,
+                    ts_sender: msg.ts,
+                    t_decrypt_ms: 0,
+                    ok_decrypt: true,
+                    auto_translate: autoTranslateRef.current,
+                    target_lang: targetLangRef.current,
+                });
+
+                const ui: UiMessage = {
+                    id: makeId(),
+                    sender_id: msg.sender_id,
+                    ts: msg.ts,
+                    original: msg.body,
+                    view: "original",
+                    // demo: show plaintext in the "ciphertext" line so you can explain baseline vs E2EE
+                    ciphertext: `(baseline plaintext) ${msg.body}`,
+                };
+
+                const shouldAutoTranslate = autoTranslateRef.current && !!translateOnline;
+                if (shouldAutoTranslate) {
+                    const trStart = Date.now();
+                    const tr0 = performance.now();
+                    try {
+                        const t = await getOrTranslate(msg.body, targetLangRef.current);
+                        const tr1 = performance.now();
+
+                        telemetryRef.current.push({
+                            type: "translate",
+                            msg_id: msg.msg_id ?? "missing",
+                            v: (msg.v ?? 1) as number,
+                            room_id: msg.room_id,
+                            ts_translate_start: trStart,
+                            t_translate_ms: Number(Math.max(0, tr1 - tr0).toFixed(3)),
+                            ok_translate: true,
+                            target_lang: targetLangRef.current,
+                        });
+
+                        ui.translated = t;
+                        ui.view = "translated";
+                    } catch {
+                        const tr1 = performance.now();
+
+                        telemetryRef.current.push({
+                            type: "translate",
+                            msg_id: msg.msg_id ?? "missing",
+                            v: (msg.v ?? 1) as number,
+                            room_id: msg.room_id,
+                            ts_translate_start: trStart,
+                            t_translate_ms: Number(Math.max(0, tr1 - tr0).toFixed(3)),
+                            ok_translate: false,
+                            target_lang: targetLangRef.current,
+                        });
+
+                        ui.translateError = "translate failed";
+                        ui.view = "original";
+                    }
+                }
+
+                setMessages((prev) => [...prev, ui]);
+
+                const tsDisplay = Date.now();
+                telemetryRef.current.push({
+                    type: "msg_display",
+                    msg_id: msg.msg_id ?? "missing",
+                    v: (msg.v ?? 1) as number,
+                    room_id: msg.room_id,
+                    ts_display: tsDisplay,
+                    ts_sender: msg.ts,
+                    total_e2e_ms: tsDisplay - msg.ts,
+                    displayed_view: ui.view,
+                });
+
+                return;
+            }
+
+            // ------------------------------
+            // E2EE PATH (nonce + ciphertext)
+            // ------------------------------
             const key = roomKeyRef.current;
             if (!key) return;
-
-            const recvNow = Date.now();
 
             // ---- Decrypt timing + telemetry ----
             const d0 = performance.now();
@@ -288,7 +391,6 @@ export default function ChatPage() {
             });
         });
 
-
         return () => {
             socket.disconnect();
             socketRef.current = null;
@@ -306,6 +408,8 @@ export default function ChatPage() {
         if (!normalizedRoomId) return;
         if (status !== "connected") return;
 
+        // We keep deriving the room key on join even if encryption is OFF.
+        // Reason: avoids edge-cases when user toggles encryption during a session.
         const key = await deriveRoomKey(normalizedRoomId);
         roomKeyRef.current = key;
         setCryptoReady(true);
@@ -329,24 +433,55 @@ export default function ChatPage() {
         if (!text) return;
         if (!joined || !activeRoomRef.current) return;
 
-        const key = roomKeyRef.current;
-        if (!key) return;
-
         const msg_id = makeId();
-        const t0 = performance.now();
-        const payload = await encryptMessage(text, key);
-        const t1 = performance.now();
+        const ts = Date.now();
 
-        const bytes_ciphertext = payload.ciphertext.length; // base64 length (good enough proxy)
+        if (encryptionOnRef.current) {
+            const key = roomKeyRef.current;
+            if (!key) return;
 
+            const t0 = performance.now();
+            const payload = await encryptMessage(text, key);
+            const t1 = performance.now();
+
+            const msg: WireMessage = {
+                v: 1,
+                msg_id,
+                room_id: activeRoomRef.current,
+                sender_id: identity.anon_id,
+                ts,
+                enc: true,
+                nonce: payload.nonce,
+                ciphertext: payload.ciphertext,
+            };
+
+            telemetryRef.current.push({
+                type: "msg_send",
+                v: 1,
+                msg_id,
+                room_id: msg.room_id,
+                sender_id: msg.sender_id,
+                ts_client_send: Date.now(),
+                t_encrypt_ms: Number(Math.max(0, t1 - t0).toFixed(3)),
+                bytes_ciphertext: payload.ciphertext.length,
+                auto_translate: autoTranslateRef.current,
+                target_lang: targetLangRef.current,
+            });
+
+            socketRef.current?.emit("send_message", msg);
+            setDraft("");
+            return;
+        }
+
+        // BASELINE send: plaintext
         const msg: WireMessage = {
             v: 1,
             msg_id,
             room_id: activeRoomRef.current,
             sender_id: identity.anon_id,
-            ts: Date.now(),
-            nonce: payload.nonce,
-            ciphertext: payload.ciphertext,
+            ts,
+            enc: false,
+            body: text,
         };
 
         telemetryRef.current.push({
@@ -356,12 +491,12 @@ export default function ChatPage() {
             room_id: msg.room_id,
             sender_id: msg.sender_id,
             ts_client_send: Date.now(),
-            t_encrypt_ms: Number(Math.max(0, t1 - t0).toFixed(3)),
-            bytes_ciphertext,
+            t_encrypt_ms: 0,
+            // reuse "bytes_ciphertext" as payload-size proxy for baseline
+            bytes_ciphertext: msg.body.length,
             auto_translate: autoTranslateRef.current,
             target_lang: targetLangRef.current,
         });
-
 
         socketRef.current?.emit("send_message", msg);
         setDraft("");
@@ -380,9 +515,7 @@ export default function ChatPage() {
 
         // original -> translated
         if (!translateOnline) {
-            setMessages((prev) =>
-                prev.map((m) => (m.id === id ? { ...m, translateError: "translation service offline" } : m))
-            );
+            setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, translateError: "translation service offline" } : m)));
             return;
         }
 
@@ -395,15 +528,9 @@ export default function ChatPage() {
 
         try {
             const t = await getOrTranslate(current.original, targetLang);
-            setMessages((prev) =>
-                prev.map((m) =>
-                    m.id === id ? { ...m, translated: t, view: "translated", translating: false } : m
-                )
-            );
+            setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, translated: t, view: "translated", translating: false } : m)));
         } catch {
-            setMessages((prev) =>
-                prev.map((m) => (m.id === id ? { ...m, translating: false, translateError: "translate failed" } : m))
-            );
+            setMessages((prev) => prev.map((m) => (m.id === id ? { ...m, translating: false, translateError: "translate failed" } : m)));
         }
     };
 
@@ -435,8 +562,7 @@ export default function ChatPage() {
                         fontSize: 13,
                     }}
                 >
-                    Translation service is offline. Start LibreTranslate (e.g. <code>libretranslate --port 5000</code>) to enable
-                    translations.
+                    Translation service is offline. Start LibreTranslate (e.g. <code>libretranslate --port 5000</code>) to enable translations.
                 </div>
             )}
 
@@ -454,6 +580,12 @@ export default function ChatPage() {
                 </div>
 
                 <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}>
+                    {/* (NEW) Baseline toggle */}
+                    <label style={{ fontSize: 12, opacity: 0.85, display: "flex", gap: 6, alignItems: "center" }}>
+                        <input type="checkbox" checked={encryptionOn} onChange={(e) => setEncryptionOn(e.target.checked)} />
+                        Encryption (E2EE)
+                    </label>
+
                     <label style={{ fontSize: 12, opacity: 0.85, display: "flex", gap: 6, alignItems: "center" }}>
                         <input
                             type="checkbox"
@@ -487,7 +619,6 @@ export default function ChatPage() {
                             const secret = generateSecureRoomSecret(24);
                             setRoomId(secret);
 
-                            // optional auto-copy
                             if (navigator.clipboard) {
                                 navigator.clipboard.writeText(secret).catch(() => { });
                             }
@@ -513,16 +644,12 @@ export default function ChatPage() {
                     <button onClick={() => router.push("/logout")} style={{ padding: "8px 10px" }}>
                         Logout
                     </button>
-                    <button
-                        onClick={() => router.push("/logs")}
-                        style={{ padding: "8px 10px" }}
-                    >
+
+                    <button onClick={() => router.push("/logs")} style={{ padding: "8px 10px" }}>
                         View logs
                     </button>
-                    <button
-                        onClick={() => telemetryRef.current.clear()}
-                        style={{ padding: "8px 10px" }}
-                    >
+
+                    <button onClick={() => telemetryRef.current.clear()} style={{ padding: "8px 10px" }}>
                         Clear logs
                     </button>
                 </div>
@@ -539,9 +666,7 @@ export default function ChatPage() {
                 }}
             >
                 {!joined ? (
-                    <p style={{ opacity: 0.7 }}>
-                        Enter a room ID and click Join. Use a high-entropy room ID as the shared secret.
-                    </p>
+                    <p style={{ opacity: 0.7 }}>Enter a room ID and click Join. Use a high-entropy room ID as the shared secret.</p>
                 ) : messages.length === 0 ? (
                     <p style={{ opacity: 0.7 }}>No messages yet. Type something and send.</p>
                 ) : (
@@ -570,7 +695,16 @@ export default function ChatPage() {
 
                                         {/* Per-message toggle when auto-translate is OFF */}
                                         {!autoTranslate && (
-                                            <div style={{ marginTop: 6, display: "flex", gap: 10, alignItems: "center", fontSize: 12, opacity: 0.85 }}>
+                                            <div
+                                                style={{
+                                                    marginTop: 6,
+                                                    display: "flex",
+                                                    gap: 10,
+                                                    alignItems: "center",
+                                                    fontSize: 12,
+                                                    opacity: 0.85,
+                                                }}
+                                            >
                                                 <button onClick={() => toggleMessageView(m.id)} style={{ padding: "4px 8px", fontSize: 12 }}>
                                                     {m.view === "original" ? "Show translated" : "Show original"}
                                                 </button>
@@ -582,7 +716,15 @@ export default function ChatPage() {
 
                                         {/* --- Ciphertext demo (comment out anytime) --- */}
                                         {m.ciphertext && (
-                                            <div style={{ marginTop: 6, fontSize: 11, opacity: 0.55, fontFamily: "monospace", wordBreak: "break-all" }}>
+                                            <div
+                                                style={{
+                                                    marginTop: 6,
+                                                    fontSize: 11,
+                                                    opacity: 0.55,
+                                                    fontFamily: "monospace",
+                                                    wordBreak: "break-all",
+                                                }}
+                                            >
                                                 <span style={{ fontStyle: "italic" }}>ciphertext:</span> {m.ciphertext}
                                             </div>
                                         )}
